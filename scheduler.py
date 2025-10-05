@@ -8,10 +8,10 @@ def basic_job():
     print("Job Started at: ", datetime.now())
 
 # Run every minute
-schedule.every().day.at("16:49").do(run_stock_job)
+schedule.every().day.at("18:27").do(basic_job)
 
 # Run every minute
-schedule.every().day.at("14:49").do(run_stock_job)
+schedule.every().day.at("18:27").do(run_stock_job)
 
 while True:
     schedule.run_pending()

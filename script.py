@@ -1,14 +1,46 @@
-import requests 
+import requests
 import os
 import time
-import csv
+import sys
 from dotenv import load_dotenv
+import snowflake.connector
+from datetime import datetime
 
 def run_stock_job():
+    run_date = datetime.now().strftime('%Y-%m-%d')
 
     # Load environment variables
     load_dotenv()
     POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+
+    # Snowflake credentials from .env
+    SF_ACCOUNT = os.getenv("SF_ACCOUNT")
+    SF_USER = os.getenv("SF_USER")
+    SF_PASSWORD = os.getenv("SF_PASSWORD")
+    SF_WAREHOUSE = os.getenv("SF_WAREHOUSE")
+    SF_DATABASE = os.getenv("SF_DATABASE")
+    SF_SCHEMA = os.getenv("SF_SCHEMA")
+    SF_TABLE = os.getenv("SF_TABLE", "STOCK_TICKERS")
+
+    try:
+        conn = snowflake.connector.connect(
+            account=os.getenv("SF_ACCOUNT"),
+            user=os.getenv("SF_USER"),
+            password=os.getenv("SF_PASSWORD"),
+            warehouse=os.getenv("SF_WAREHOUSE"),
+            database=os.getenv("SF_DATABASE"),
+            schema=os.getenv("SF_SCHEMA"),
+        )
+
+        cursor = conn.cursor()
+        cursor.execute("SELECT CURRENT_VERSION()")
+        version = cursor.fetchone()
+        print(f"✅ Connected to Snowflake. Version: {version[0]}")
+
+    except Exception as e:
+        print("❌ Failed to connect to Snowflake.")
+        print("Error:", e)
+        sys.exit(1)
 
     # Polygon API request
     url = f'https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&order=asc&limit=1000&sort=ticker&apiKey={POLYGON_API_KEY}'
@@ -17,51 +49,45 @@ def run_stock_job():
     data = response.json()
 
     # Collect first page of results
-    for ticker in data['results']:
-        tickers.append(ticker)
+    tickers.extend(data['results'])
 
     # Loop through pagination
     while 'next_url' in data:
         print(len(tickers))
         time.sleep(20)
         response = requests.get(data['next_url'] + f'&apiKey={POLYGON_API_KEY}')
-
         data = response.json()
-
-        for ticker in data['results']:
-            tickers.append(ticker)
-
+        tickers.extend(data['results'])
         print(f"Collected {len(tickers)} tickers so far...")
 
-    # Example ticker defines which fields we’ll write
-    example_ticker = {
-        'ticker': 'CHRW', 
-        'name': 'C.H. Robinson Worldwide, Inc.',
-        'market': 'stocks',
-        'locale': 'us',
-        'primary_exchange': 'XNAS',
-        'type': 'CS',
-        'active': True,
-        'currency_name': 'usd',
-        'cik': '0001043277',
-        'composite_figi': 'BBG000BTCH57',
-        'share_class_figi': 'BBG001SB6KF5',
-        'last_updated_utc': '2025-09-16T06:05:51.696907049Z'
-    }
+    # Insert data into Snowflake
+    insert_query = f"""
+        INSERT INTO {SF_TABLE} (
+            ticker, name, market, locale, primary_exchange, type, active, currency_name, 
+            cik, composite_figi, share_class_figi, last_updated_utc, ds
+        ) VALUES (%(ticker)s, %(name)s, %(market)s, %(locale)s, %(primary_exchange)s, %(type)s, 
+                  %(active)s, %(currency_name)s, %(cik)s, %(composite_figi)s, %(share_class_figi)s, %(last_updated_utc)s, %(ds)s)
+    """
+    
+    expected_keys = [
+        'ticker', 'name', 'market', 'locale', 'primary_exchange', 'type',
+        'active', 'currency_name', 'cik', 'composite_figi', 'share_class_figi', 'last_updated_utc', 'ds'
+    ]
 
-    # CSV file path
-    csv_file = "tickers.csv"
+    # Prepare safe tickers
+    safe_tickers = [
+        {**{key: t.get(key, None) for key in expected_keys}, "ds": run_date}
+        for t in tickers
+    ]
 
-    # Write to CSV
-    with open(csv_file, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=example_ticker.keys())
-        writer.writeheader()
-        for t in tickers:
-            # filter ticker dict to only include keys we care about
-            row = {key: t.get(key, "") for key in example_ticker.keys()}
-            writer.writerow(row)
+    # Insert all rows at once
+    cursor.executemany(insert_query, safe_tickers)
+    conn.commit()
 
-    print(f"Saved {len(tickers)} tickers to {csv_file}")
+    print(f"Inserted {len(tickers)} tickers into Snowflake table {SF_TABLE}")
+
+    cursor.close()
+    conn.close()
 
 if __name__ == '__main__':
     run_stock_job()
